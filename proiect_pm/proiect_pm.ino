@@ -1,7 +1,11 @@
-#include <Adafruit_GFX.h> // Include core graphics library for the display
-#include <Adafruit_SSD1306.h> // Include Adafruit_SSD1306 library to drive the display
+#include <Adafruit_GFX.h> // core graphics library
+#include <Adafruit_SSD1306.h> // library to drive the display
 
-Adafruit_SSD1306 display(128, 64); // Create display
+Adafruit_SSD1306 display(128, 64); // create display
+
+#define LED_RED_PIN     11
+#define LED_GREEN_PIN   10
+#define LED_BLUE_PIN    9
 
 #define CHANGE_MODE_PIN 2
 #define WAKE_PIN        3
@@ -9,8 +13,11 @@ Adafruit_SSD1306 display(128, 64); // Create display
 #define HUMIDITY_PIN    A2
 #define BATTERY_PIN     A3
 
+#define DRY_VOLTAGE     3.0
+#define WET_VOLTAGE     1.5
+
 float temperature = 0;
-float humidity    = 0;
+float humidity    = 0; // percent
 float voltage     = 0;
 
 volatile bool             changeMode = false;
@@ -28,13 +35,25 @@ const unsigned long standbyTime = 60000; // 1 minute
 volatile bool standby = false;
 volatile bool wakeFlag = false;
 
-enum FunctionMode {
-  AUTOMAT,
-  MANUAL,
-  TEMPORIZAT
+unsigned long lastLedUpdate = 0;
+int brightness = 0;
+int fadeAmount = 5;
+
+enum LEDState {
+  OFF,
+  RED_FADE,
+  BLUE_FADE
 };
 
-FunctionMode mode = AUTOMAT;
+LEDState LEDMode = OFF;
+
+enum FunctionMode {
+  HUMIDITY,
+  MANUAL,
+  TIMED
+};
+
+FunctionMode mode = HUMIDITY;
 
 void handleChangeModeButton() {
   if (!standby) {
@@ -53,25 +72,31 @@ void handleWakeButton() {
 
 void setup() {
 
-  delay(100); // This delay is needed to let the display to initialize
-  display.begin(SSD1306_SWITCHCAPVCC, 0x3C); // Initialize display with the I2C address of 0x3C
-  display.clearDisplay(); // Clear the buffer
-  display.setTextColor(WHITE); // Set color of the text
+  delay(100); // delay needed to let display initiate
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C); // initialize display with the I2C address of 0x3C
+  display.clearDisplay(); // clear buffer
+  display.setTextColor(WHITE);
 
-  display.setRotation(0); // Set orientation. Goes from 0, 1, 2 or 3
-  display.setTextWrap(false); // By default, long lines of text are set to automatically ΓÇ£wrapΓÇ¥ back to the leftmost column.
+  display.setRotation(0); // set orientation
+  display.setTextWrap(false);
 
-  // To override this behavior (so text will run off the right side of the display - useful for
-  // scrolling marquee effects), use setTextWrap(false). The normal wrapping behavior is restored
-  // with setTextWrap(true).
-
-  display.dim(1); //Set brightness (0 is maximun and 1 is a little dim)
+  display.dim(1); // set brightness (0 is maximun and 1 is a little dim)
 
   pinMode(CHANGE_MODE_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(CHANGE_MODE_PIN), handleChangeModeButton, FALLING);
 
   pinMode(WAKE_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(WAKE_PIN), handleWakeButton, FALLING);
+
+  pinMode(LED_RED_PIN, OUTPUT);
+  pinMode(LED_GREEN_PIN, OUTPUT);
+  pinMode(LED_BLUE_PIN, OUTPUT);
+
+  // led off
+  analogWrite(LED_RED_PIN,  255);
+  analogWrite(LED_GREEN_PIN,255);
+  analogWrite(LED_BLUE_PIN, 255);
+
 }
 
 
@@ -79,29 +104,26 @@ void displayHandler() {
   
   // Convert Variable1 into a string, so we can change the text alignment to the right:
   // It can be also used to add or remove decimal numbers.
-  char string[10]; // Create a character array of 10 characters
+  char string[10];
 
-  float number = 10.0;
-
-  // Convert float to a string:
+  // convert float to a string
   dtostrf(temperature, 4, 2, string); // (<variable>,<amount of digits we are going to use>,<amount of decimal digits>,<string name>)
-  display.clearDisplay(); // Clear the display so we can refresh
+  display.clearDisplay();
 
   display.setCursor(0, 8);
   display.print("Mode: ");
 
   switch(mode) {
-    case AUTOMAT:
-      display.print("Automat");
+    case HUMIDITY:
+      display.print("Humidity");
       break;
     case MANUAL:
       display.print("Manual");
       break;
-    case TEMPORIZAT:
-      display.print("Temporizat");
+    case TIMED:
+      display.print("Timed");
       break;
   }
-
 
   display.setCursor(0, 50);
   display.print("Temp: ");
@@ -116,11 +138,105 @@ void displayHandler() {
   display.setCursor(0, 30);
   display.print("Hum: ");
   display.print(string);
+  display.print("%");
 
   display.display(); // print everything set
 }
 
+void handleLEDSignal() {
+
+  if (millis() - lastLedUpdate >= 20) {
+    lastLedUpdate = millis();
+
+    brightness += fadeAmount;
+
+    if (brightness <= 0 || brightness >= 255) {
+      fadeAmount = -fadeAmount;
+    }
+  }
+
+  switch(LEDMode) {
+    case OFF:
+      analogWrite(LED_RED_PIN,  255);
+      analogWrite(LED_BLUE_PIN, 255);
+      break;
+    case RED_FADE:
+      analogWrite(LED_RED_PIN,  255 - brightness);
+      analogWrite(LED_BLUE_PIN, 255);
+      break;
+    case BLUE_FADE:
+      analogWrite(LED_RED_PIN,  255);
+      analogWrite(LED_BLUE_PIN, 255 - brightness);
+      break;
+  }
+}
+
+void readTemperature() {
+  if (millis() - lastReadTimeTemp >= intervalTemp) {
+    lastReadTimeTemp = millis();
+    temperature = analogRead(TEMP_PIN) * 0.488;
+  }
+}
+
+void readBatteryVoltage() {
+  if (millis() - lastReadTimeBattery >= intervalBattery) {
+    lastReadTimeBattery = millis();
+    voltage = analogRead(BATTERY_PIN) * (5.0 / 1023.0) * 2;
+  }
+}
+
+void readHumidity() {
+  if (millis() - lastReadTimeHumidity >= intervalHumidity) {
+    lastReadTimeHumidity = millis();
+
+    float sensorVoltage = analogRead(HUMIDITY_PIN) * (5.0 / 1023.0);
+
+    humidity = (DRY_VOLTAGE - sensorVoltage) * 100.0 / (DRY_VOLTAGE - WET_VOLTAGE);
+
+    if (humidity > 100) {
+      humidity = 100;
+    }
+    if (humidity < 0) {
+      humidity = 0;
+    }
+  }
+}
+
+void humidityWatering() {
+
+}
+
+void manualWatering() {
+
+}
+
+void timedWatering() {
+  
+}
+
+void handleMode() {
+   switch(mode) {
+    case HUMIDITY:
+      humidityWatering();
+      break;
+    case MANUAL:
+      manualWatering();
+      break;
+    case TIMED:
+      timedWatering();
+      break;
+  }
+}
+
 void loop() {
+
+  readHumidity();
+
+  readBatteryVoltage();
+
+  handleLEDSignal();
+
+  handleMode();
 
   if (!standby && (millis() - lastActivityTime >= standbyTime)) {
     standby = true;
@@ -143,21 +259,8 @@ void loop() {
     mode = (FunctionMode)((mode + 1) % 3);
   }
 
-  if (millis() - lastReadTimeTemp >= intervalTemp) {
-    lastReadTimeTemp = millis();
-    temperature = analogRead(TEMP_PIN) * 0.488;
-  }
-
-  if (millis() - lastReadTimeBattery >= intervalBattery) {
-    lastReadTimeBattery = millis();
-    voltage = analogRead(BATTERY_PIN) * (5.0 / 1023.0) * 2;
-  }
-
-  // humidity LOW => value HIGH
-  if (millis() - lastReadTimeHumidity >= intervalHumidity) {
-    lastReadTimeHumidity = millis();
-    humidity = analogRead(HUMIDITY_PIN) * (5.0 / 1023.0);
-  }
+  // temperature not read when in standby
+  readTemperature();
 
   displayHandler();
 }
