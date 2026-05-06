@@ -3,18 +3,25 @@
 
 Adafruit_SSD1306 display(128, 64); // Create display
 
-#include <Fonts/FreeMonoBold12pt7b.h> // Add a custom font
-#include <Fonts/FreeMono9pt7b.h> // Add a custom font
-
 #define CHANGE_MODE_PIN 2
 #define WAKE_PIN        3
 #define TEMP_PIN        A0
+#define HUMIDITY_PIN    A2
+#define BATTERY_PIN     A3
 
 float temperature = 0;
+float humidity    = 0;
+float voltage     = 0;
 
-volatile bool changeMode = false;
-unsigned long lastReadTimeTemp = 0;
-const unsigned long intervalTemp = 1000; // ms
+volatile bool             changeMode = false;
+unsigned long       lastReadTimeTemp = 0;
+const unsigned long     intervalTemp = 1000; // ms
+
+unsigned long lastReadTimeBattery = 0;
+const unsigned long intervalBattery = 30000; // ms
+
+unsigned long lastReadTimeHumidity = 0;
+const unsigned long intervalHumidity = 30000; // ms
 
 unsigned long lastActivityTime = 0;
 const unsigned long standbyTime = 60000; // 1 minute
@@ -79,27 +86,36 @@ void displayHandler() {
   // Convert float to a string:
   dtostrf(temperature, 4, 2, string); // (<variable>,<amount of digits we are going to use>,<amount of decimal digits>,<string name>)
   display.clearDisplay(); // Clear the display so we can refresh
-  display.setFont(&FreeMono9pt7b); // Set a custom font
-  display.setTextSize(0); // Set text size. We are using a custom font so you should always use the text size of 0
 
-  display.setCursor(0, 10);
-  display.println("Mode:");
+  display.setCursor(0, 8);
+  display.print("Mode: ");
 
-  display.setCursor(60, 10);
   switch(mode) {
     case AUTOMAT:
-      display.println("Automat");
+      display.print("Automat");
       break;
     case MANUAL:
-      display.println("Manual");
+      display.print("Manual");
       break;
     case TEMPORIZAT:
-      display.println("Temporizat");
+      display.print("Temporizat");
       break;
   }
 
-  display.setCursor(0, 60);
-  display.println(string);
+
+  display.setCursor(0, 50);
+  display.print("Temp: ");
+  display.print(string);
+
+  dtostrf(voltage, 3, 2, string);
+  display.setCursor(75, 50);
+  display.print("V: ");
+  display.print(string);
+
+  dtostrf(humidity, 3, 2, string);
+  display.setCursor(0, 30);
+  display.print("Hum: ");
+  display.print(string);
 
   display.display(); // print everything set
 }
@@ -112,6 +128,7 @@ void loop() {
 
   if (wakeFlag) {
     display.ssd1306_command(SSD1306_DISPLAYON);
+    wakeFlag = false;
   }
 
   if (standby) {
@@ -129,6 +146,17 @@ void loop() {
   if (millis() - lastReadTimeTemp >= intervalTemp) {
     lastReadTimeTemp = millis();
     temperature = analogRead(TEMP_PIN) * 0.488;
+  }
+
+  if (millis() - lastReadTimeBattery >= intervalBattery) {
+    lastReadTimeBattery = millis();
+    voltage = analogRead(BATTERY_PIN) * (5.0 / 1023.0) * 2;
+  }
+
+  // humidity LOW => value HIGH
+  if (millis() - lastReadTimeHumidity >= intervalHumidity) {
+    lastReadTimeHumidity = millis();
+    humidity = analogRead(HUMIDITY_PIN) * (5.0 / 1023.0);
   }
 
   displayHandler();
