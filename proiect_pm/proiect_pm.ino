@@ -1,34 +1,39 @@
 #include <Adafruit_GFX.h> // core graphics library
 #include <Adafruit_SSD1306.h> // library to drive the display
+#include <EEPROM.h> // for persistence
 
 Adafruit_SSD1306 display(128, 64); // create display
 
-#define LED_RED_PIN     11
-#define LED_GREEN_PIN   10
-#define LED_BLUE_PIN    9
+#define EEPROM_MODE_ADDR     0
+#define EEPROM_HUMIDITY_ADDR 1
+#define EEPROM_TIMED_ADDR    2
 
-#define CHANGE_MODE_PIN 2 // PD2 / INT0
-#define CHANGE_VALS_PIN 3 // PD3 / INT1
-#define WAKE_PIN        4 // PD4 / PCINT20
-#define TEMP_PIN        A0
-#define HUMIDITY_PIN    A2
-#define BATTERY_PIN     A3
+#define LED_RED_PIN          11  // PB3
+#define LED_GREEN_PIN        10  // PB2
+#define LED_BLUE_PIN         9   // PB1
 
-#define DRY_VOLTAGE     3.0
-#define WET_VOLTAGE     1.4
+#define CHANGE_MODE_PIN      2   // PD2 / INT0
+#define CHANGE_VALS_PIN      3   // PD3 / INT1
+#define WAKE_PIN             4   // PD4 / PCINT20
+#define TEMP_PIN             A0  // PC0
+#define HUMIDITY_PIN         A2  // PC2
+#define BATTERY_PIN          A3  // PC3
 
-#define NUM_LEVELS      4
+#define DRY_VOLTAGE          3.0
+#define WET_VOLTAGE          1.4
+
+#define NUM_LEVELS           4
 
 const int humidityThresholds[] = {50, 60, 70, 80};
 const int wateringIntervals[]  = {1, 2, 3, 4};
 
 int selectedValuesList = 0;
 
-int humidityIndex = 0;
-int timedIndex = 0;
+int humidityIndex;
+int timedIndex;
 
-int humidityThreshold = humidityThresholds[humidityIndex];
-int wateringTime = wateringIntervals[timedIndex];
+int humidityThreshold;
+int wateringTime;
 
 float temperature = 0;
 float humidity    = 0; // percent
@@ -67,7 +72,7 @@ enum FunctionMode {
   TIMED
 };
 
-FunctionMode mode = HUMIDITY;
+FunctionMode mode;
 
 enum ScreenMode {
   STANDARD,
@@ -81,17 +86,24 @@ ScreenMode screen = STANDARD;
 void handleChangeModeButton() {
   if (!standby) {
 
+    lastActivityTime = millis();
+
+    // temporary solution for weird bug that increments saved mode on reset
+    if (lastActivityTime < 500) {
+      return;
+    }
+
     if (screen == STANDARD) {
       changeMode = true;
-      lastActivityTime = millis();
     } else {
       selectedValuesList = (selectedValuesList + 1) % 2;
     }
+
   }
 }
 
 void handleChangeValsButton() {
-  if (standby) {
+  if (standby || screen == STANDARD) {
     return;
   }
 
@@ -104,6 +116,13 @@ void handleChangeValsButton() {
   lastActivityTime = millis();
 }
 
+void updateEEPROM() {
+  Serial.println(mode);
+  EEPROM.update(EEPROM_MODE_ADDR, mode);
+  EEPROM.update(EEPROM_HUMIDITY_ADDR, humidityIndex);
+  EEPROM.update(EEPROM_TIMED_ADDR, timedIndex);
+}
+
 // ISR for exiting standby mode and for changing screens
 ISR(PCINT2_vect) {
   if (standby) {
@@ -111,7 +130,13 @@ ISR(PCINT2_vect) {
   } else {
 
     if (digitalRead(WAKE_PIN) == LOW) {
+      
+      if (screen == MENU) {
+        updateEEPROM();
+      }
+
       screen = (screen + 1) % 2;
+
     }
   }
 }
@@ -152,6 +177,27 @@ void setup() {
   analogWrite(LED_RED_PIN,  255);
   analogWrite(LED_GREEN_PIN,255);
   analogWrite(LED_BLUE_PIN, 255);
+
+  // persistence of settings
+  mode = EEPROM.read(EEPROM_MODE_ADDR);
+
+  if (mode > TIMED) { 
+    mode = HUMIDITY;
+  }
+
+  humidityIndex = EEPROM.read(EEPROM_HUMIDITY_ADDR);
+  timedIndex    = EEPROM.read(EEPROM_TIMED_ADDR);
+
+  if (humidityIndex >= NUM_LEVELS) {
+    humidityIndex = 0;
+  }
+
+  if (timedIndex >= NUM_LEVELS) {
+    timedIndex = 0;
+  }
+
+  humidityThreshold = humidityThresholds[humidityIndex];
+  wateringTime = wateringIntervals[timedIndex];
 
 }
 
@@ -343,6 +389,9 @@ void loop() {
 
   if (!standby && (millis() - lastActivityTime >= standbyTime)) {
     standby = true;
+    //if (screen == MENU) {
+      updateEEPROM();
+    //}
     // power management settings maybe
   }
 
