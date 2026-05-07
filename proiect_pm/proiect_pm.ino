@@ -14,7 +14,7 @@ Adafruit_SSD1306 display(128, 64); // create display
 #define BATTERY_PIN     A3
 
 #define DRY_VOLTAGE     3.0
-#define WET_VOLTAGE     1.5
+#define WET_VOLTAGE     1.4
 
 float temperature = 0;
 float humidity    = 0; // percent
@@ -71,6 +71,8 @@ void handleWakeButton() {
 }
 
 void setup() {
+
+  Serial.begin(9600);
 
   delay(100); // delay needed to let display initiate
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C); // initialize display with the I2C address of 0x3C
@@ -190,6 +192,9 @@ void readHumidity() {
     lastReadTimeHumidity = millis();
 
     float sensorVoltage = analogRead(HUMIDITY_PIN) * (5.0 / 1023.0);
+
+    Serial.print("Voltage:");
+    Serial.println(sensorVoltage);
 
     humidity = (DRY_VOLTAGE - sensorVoltage) * 100.0 / (DRY_VOLTAGE - WET_VOLTAGE);
 
