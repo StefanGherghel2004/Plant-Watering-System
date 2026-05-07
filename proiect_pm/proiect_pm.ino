@@ -7,14 +7,28 @@ Adafruit_SSD1306 display(128, 64); // create display
 #define LED_GREEN_PIN   10
 #define LED_BLUE_PIN    9
 
-#define CHANGE_MODE_PIN 2
-#define WAKE_PIN        3
+#define CHANGE_MODE_PIN 2 // PD2 / INT0
+#define CHANGE_VALS_PIN 3 // PD3 / INT1
+#define WAKE_PIN        4 // PD4 / PCINT20
 #define TEMP_PIN        A0
 #define HUMIDITY_PIN    A2
 #define BATTERY_PIN     A3
 
 #define DRY_VOLTAGE     3.0
 #define WET_VOLTAGE     1.4
+
+#define NUM_LEVELS      4
+
+const int humidityThresholds[] = {50, 60, 70, 80};
+const int wateringIntervals[]  = {1, 2, 3, 4};
+
+int selectedValuesList = 0;
+
+int humidityIndex = 0;
+int timedIndex = 0;
+
+int humidityThreshold = humidityThresholds[humidityIndex];
+int wateringTime = wateringIntervals[timedIndex];
 
 float temperature = 0;
 float humidity    = 0; // percent
@@ -55,24 +69,57 @@ enum FunctionMode {
 
 FunctionMode mode = HUMIDITY;
 
+enum ScreenMode {
+  STANDARD,
+  MENU
+};
+
+ScreenMode screen = STANDARD;
+
+// button contains function for changing mode of operation in STANDARD screen
+// and changing parameter to modifify in MENU screen
 void handleChangeModeButton() {
   if (!standby) {
-    changeMode = true;
-    lastActivityTime = millis();
+
+    if (screen == STANDARD) {
+      changeMode = true;
+      lastActivityTime = millis();
+    } else {
+      selectedValuesList = (selectedValuesList + 1) % 2;
+    }
   }
 }
 
-void handleWakeButton() {
+void handleChangeValsButton() {
+  if (standby) {
+    return;
+  }
+
+  if (selectedValuesList == 0) {
+    humidityIndex = (humidityIndex + 1) % NUM_LEVELS;
+  } else {
+    timedIndex = (timedIndex + 1) % NUM_LEVELS;
+  }
+
+  lastActivityTime = millis();
+}
+
+// ISR for exiting standby mode and for changing screens
+ISR(PCINT2_vect) {
   if (standby) {
     wakeFlag = true;
+  } else {
+
+    if (digitalRead(WAKE_PIN) == LOW) {
+      screen = (screen + 1) % 2;
+    }
   }
-  standby = false;
-  lastActivityTime = millis();
 }
 
 void setup() {
 
   Serial.begin(9600);
+  sei();
 
   delay(100); // delay needed to let display initiate
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C); // initialize display with the I2C address of 0x3C
@@ -87,8 +134,15 @@ void setup() {
   pinMode(CHANGE_MODE_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(CHANGE_MODE_PIN), handleChangeModeButton, FALLING);
 
+  pinMode(CHANGE_VALS_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(CHANGE_VALS_PIN), handleChangeValsButton, FALLING);
+
+  // wake button interrupt logic
   pinMode(WAKE_PIN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(WAKE_PIN), handleWakeButton, FALLING);
+  // Enable PCINT for PORTD
+  PCICR |= (1 << PCIE2);
+  // Enable pin D4 (PCINT20)
+  PCMSK2 |= (1 << PCINT20);
 
   pinMode(LED_RED_PIN, OUTPUT);
   pinMode(LED_GREEN_PIN, OUTPUT);
@@ -101,9 +155,16 @@ void setup() {
 
 }
 
+void displayArray(int size, int *array, int x, int y) {
+  display.setCursor(x, y);
+  for (int i = 0; i < size; i++) {
+    display.print(array[i]);
+    display.print(" ");
+  }
+}
 
-void displayHandler() {
-  
+void displayStandardScreen() {
+   
   // Convert Variable1 into a string, so we can change the text alignment to the right:
   // It can be also used to add or remove decimal numbers.
   char string[10];
@@ -143,6 +204,42 @@ void displayHandler() {
   display.print("%");
 
   display.display(); // print everything set
+}
+
+void displayMenuScreen() {
+  display.clearDisplay();
+
+  display.setCursor(5, 5);
+  display.print("Humidity levels:");
+  displayArray(NUM_LEVELS, humidityThresholds, 5, 20);
+
+  display.setCursor(5, 35);
+  display.print("Time intervals:");
+  displayArray(NUM_LEVELS, wateringIntervals, 5, 50);
+
+  // display selected values and parameter selected for modifying
+  if (selectedValuesList == 0) {
+    display.fillRect(3 + 18 * humidityIndex, 16, 15, 15, SSD1306_INVERSE);
+    display.drawRect(3 + 12 * timedIndex, 46, 9, 15, SSD1306_WHITE);
+  } else {
+    display.drawRect(3 + 18 * humidityIndex, 16, 15, 15, SSD1306_WHITE);
+    display.fillRect(3 + 12 * timedIndex, 46, 9, 15, SSD1306_INVERSE);
+  }
+
+  display.display();
+}
+
+
+void displayHandler() {
+
+  switch(screen) {
+    case STANDARD:
+      displayStandardScreen();
+      break;
+    case MENU:
+      displayMenuScreen();
+      break;
+  }
 }
 
 void handleLEDSignal() {
@@ -193,8 +290,9 @@ void readHumidity() {
 
     float sensorVoltage = analogRead(HUMIDITY_PIN) * (5.0 / 1023.0);
 
-    Serial.print("Voltage:");
-    Serial.println(sensorVoltage);
+    // Debug 
+    //Serial.print("Voltage:");
+    //Serial.println(sensorVoltage);
 
     humidity = (DRY_VOLTAGE - sensorVoltage) * 100.0 / (DRY_VOLTAGE - WET_VOLTAGE);
 
@@ -245,11 +343,16 @@ void loop() {
 
   if (!standby && (millis() - lastActivityTime >= standbyTime)) {
     standby = true;
+    // power management settings maybe
   }
 
   if (wakeFlag) {
     display.ssd1306_command(SSD1306_DISPLAYON);
     wakeFlag = false;
+    standby = false;
+    // back to main menu after standby
+    screen = STANDARD;
+    lastActivityTime = millis();
   }
 
   if (standby) {
