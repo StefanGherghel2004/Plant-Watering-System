@@ -12,10 +12,14 @@ Adafruit_SSD1306 display(128, 64); // create display
 #define LED_GREEN_PIN        10  // PB2
 #define LED_BLUE_PIN         9   // PB1
 
+#define RELAY_PIN            8   // PB0
+
 #define CHANGE_MODE_PIN      2   // PD2 / INT0
 #define CHANGE_VALS_PIN      3   // PD3 / INT1
 #define WAKE_PIN             4   // PD4 / PCINT20
+
 #define TEMP_PIN             A0  // PC0
+#define WATER_LEVEL_PIN      A1  // PC1
 #define HUMIDITY_PIN         A2  // PC2
 #define BATTERY_PIN          A3  // PC3
 
@@ -32,8 +36,11 @@ int selectedValuesList = 0;
 int humidityIndex;
 int timedIndex;
 
-int humidityThreshold;
-int wateringTime;
+unsigned long wateringStart = 0;
+bool watering = false;
+
+unsigned long lastHumidityWatering = 0;
+bool humidityCooldown = false;
 
 float temperature = 0;
 float humidity    = 0; // percent
@@ -53,6 +60,8 @@ unsigned long lastActivityTime = 0;
 const unsigned long standbyTime = 60000; // 1 minute
 volatile bool standby = false;
 volatile bool wakeFlag = false;
+
+int waterLevel = 0;
 
 unsigned long lastLedUpdate = 0;
 int brightness = 0;
@@ -84,12 +93,12 @@ ScreenMode screen = STANDARD;
 // button contains function for changing mode of operation in STANDARD screen
 // and changing parameter to modifify in MENU screen
 void handleChangeModeButton() {
-  if (!standby) {
+  if (!standby && !watering) {
 
     lastActivityTime = millis();
 
-    // temporary solution for weird bug that increments saved mode on reset
-    if (lastActivityTime < 500) {
+    // temporary solution for weird bug that increments saved mode on reset and after watering with spike
+    if (lastActivityTime < 500 || lastActivityTime - lastHumidityWatering < 500) {
       return;
     }
 
@@ -103,7 +112,7 @@ void handleChangeModeButton() {
 }
 
 void handleChangeValsButton() {
-  if (standby || screen == STANDARD) {
+  if (standby || screen == STANDARD || watering) {
     return;
   }
 
@@ -196,9 +205,8 @@ void setup() {
     timedIndex = 0;
   }
 
-  humidityThreshold = humidityThresholds[humidityIndex];
-  wateringTime = wateringIntervals[timedIndex];
-
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, HIGH); // pump OFF
 }
 
 void displayArray(int size, int *array, int x, int y) {
@@ -353,6 +361,37 @@ void readHumidity() {
 
 void humidityWatering() {
 
+  if (millis() < 500) {
+    return;
+  }
+
+  if (millis() - lastHumidityWatering >= 120000) {
+    humidityCooldown = false;
+  }
+
+  if (humidityCooldown) {
+    return;
+  }
+
+  if (!watering && humidity < humidityThresholds[humidityIndex]) {
+    Serial.println("Start udat umiditate");
+    Serial.println(millis());
+    digitalWrite(RELAY_PIN, LOW);
+
+    watering = true;
+    wateringStart = millis();
+  }
+
+  // 1 second for testing
+  if (watering && millis() - wateringStart >= 1000) {
+    Serial.println("Sfarsit udat umiditate");
+    Serial.println(millis());
+    digitalWrite(RELAY_PIN, HIGH);
+    
+    lastHumidityWatering = millis();
+    watering = false;
+    humidityCooldown = true;
+  }
 }
 
 void manualWatering() {
@@ -378,6 +417,11 @@ void handleMode() {
 }
 
 void loop() {
+
+  
+  //waterLevel = analogRead(WATER_LEVEL_PIN);
+
+  //Serial.println(waterLevel);  
 
   readHumidity();
 
@@ -412,6 +456,7 @@ void loop() {
   }
 
   if (changeMode) {
+    digitalWrite(RELAY_PIN, HIGH);
     changeMode = false;
     mode = (FunctionMode)((mode + 1) % 3);
   }
