@@ -13,7 +13,7 @@ Adafruit_SSD1306 display(128, 64); // create display
 #define LED_BLUE_PIN         9   // PB1
 
 #define RELAY_PIN            8   // PB0
-
+  
 #define CHANGE_MODE_PIN      2   // PD2 / INT0
 #define CHANGE_VALS_PIN      3   // PD3 / INT1
 #define WAKE_PIN             4   // PD4 / PCINT20
@@ -90,14 +90,19 @@ enum ScreenMode {
 
 ScreenMode screen = STANDARD;
 
-// button contains function for changing mode of operation in STANDARD screen
-// and changing parameter to modifify in MENU screen
-void handleChangeModeButton() {
+// ISR for changing mode of operation in STANDARD screen
+// and changing parameter to modify in MENU screen
+ISR(INT0_vect) {
   if (!standby && !watering) {
+
+    // debounce
+    if (millis() - lastActivityTime < 200) {
+      return;
+    }
 
     lastActivityTime = millis();
 
-    // temporary solution for weird bug that increments saved mode on reset and after watering with spike
+    // temporary solution for weird bug that increments saved mode on reset
     if (lastActivityTime < 500 || lastActivityTime - lastHumidityWatering < 500) {
       return;
     }
@@ -111,8 +116,13 @@ void handleChangeModeButton() {
   }
 }
 
-void handleChangeValsButton() {
+ISR(INT1_vect) {
   if (standby || screen == STANDARD || watering) {
+    return;
+  }
+
+  // debounce
+  if (millis() - lastActivityTime < 200) {
     return;
   }
 
@@ -134,6 +144,12 @@ void updateEEPROM() {
 
 // ISR for exiting standby mode and for changing screens
 ISR(PCINT2_vect) {
+
+  // debounce
+  if (millis() - lastActivityTime < 200) {
+    return;
+  }
+
   if (standby) {
     wakeFlag = true;
   } else {
@@ -146,15 +162,54 @@ ISR(PCINT2_vect) {
 
       screen = (screen + 1) % 2;
 
+      lastActivityTime = millis();
+
     }
   }
 }
 
-void setup() {
+void setupWakePin() {
+  // wake button interrupt logic
+  pinMode(WAKE_PIN, INPUT_PULLUP);
+  // enable PCINT for PORTD
+  PCICR |= (1 << PCIE2);
+  // enable D4 (PCINT20)
+  PCMSK2 |= (1 << PCINT20);
+}
 
-  Serial.begin(9600);
-  sei();
+void setupChangeModePin() {
+  // PD2 intrare
+  DDRD &= ~(1 << DDD2);
 
+  // pull-up
+  PORTD |= (1 << PORTD2);
+
+  // FALLING edge
+  EICRA |= (1 << ISC01);
+  EICRA &= ~(1 << ISC00);
+
+  // activam INT0
+  EIMSK |= (1 << INT0);
+}
+
+void setupChangeValsPin() {
+
+  // PD3 intrare
+  DDRD &= ~(1 << DDD3);
+
+  // pull-up
+  PORTD |= (1 << PORTD3);
+
+  // FALLING edge
+  EICRA |= (1 << ISC11);
+  EICRA &= ~(1 << ISC10);
+
+  // activam INT1
+  EIMSK |= (1 << INT1);
+}
+
+
+void setupDisplay() {
   delay(100); // delay needed to let display initiate
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C); // initialize display with the I2C address of 0x3C
   display.clearDisplay(); // clear buffer
@@ -165,19 +220,9 @@ void setup() {
 
   display.dim(1); // set brightness (0 is maximun and 1 is a little dim)
 
-  pinMode(CHANGE_MODE_PIN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(CHANGE_MODE_PIN), handleChangeModeButton, FALLING);
+}
 
-  pinMode(CHANGE_VALS_PIN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(CHANGE_VALS_PIN), handleChangeValsButton, FALLING);
-
-  // wake button interrupt logic
-  pinMode(WAKE_PIN, INPUT_PULLUP);
-  // Enable PCINT for PORTD
-  PCICR |= (1 << PCIE2);
-  // Enable pin D4 (PCINT20)
-  PCMSK2 |= (1 << PCINT20);
-
+void setupLED {
   pinMode(LED_RED_PIN, OUTPUT);
   pinMode(LED_GREEN_PIN, OUTPUT);
   pinMode(LED_BLUE_PIN, OUTPUT);
@@ -186,7 +231,10 @@ void setup() {
   analogWrite(LED_RED_PIN,  255);
   analogWrite(LED_GREEN_PIN,255);
   analogWrite(LED_BLUE_PIN, 255);
+}
 
+
+void setupEEPROMread() {
   // persistence of settings
   mode = EEPROM.read(EEPROM_MODE_ADDR);
 
@@ -204,6 +252,24 @@ void setup() {
   if (timedIndex >= NUM_LEVELS) {
     timedIndex = 0;
   }
+
+}
+
+
+void setup() {
+
+  Serial.begin(9600);
+  sei();
+
+  setupDisplay();
+  
+  setupChangeModePin();
+  setupChangeValsPin();
+  setupWakePin();
+
+  setupLED();
+
+  setupEEPROMread();
 
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, HIGH); // pump OFF
@@ -325,6 +391,9 @@ void handleLEDSignal() {
 }
 
 void readTemperature() {
+  if (watering) {
+    return;
+  }
   if (millis() - lastReadTimeTemp >= intervalTemp) {
     lastReadTimeTemp = millis();
     temperature = analogRead(TEMP_PIN) * 0.488;
@@ -416,8 +485,9 @@ void handleMode() {
   }
 }
 
-void loop() {
+// TO DO un fel de reset pentru ecran ca isi mai ia freeze de la releu
 
+void loop() {
   
   //waterLevel = analogRead(WATER_LEVEL_PIN);
 
