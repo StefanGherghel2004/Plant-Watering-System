@@ -41,6 +41,7 @@ bool watering = false;
 
 unsigned long lastHumidityWatering = 0;
 bool humidityCooldown = false;
+unsigned long humidityCooldownTime = 120000;
 
 float temperature = 0;
 float humidity    = 0; // percent
@@ -116,6 +117,7 @@ ISR(INT0_vect) {
   }
 }
 
+// ISR for changing values of parameters
 ISR(INT1_vect) {
   if (standby || screen == STANDARD || watering) {
     return;
@@ -222,7 +224,7 @@ void setupDisplay() {
 
 }
 
-void setupLED {
+void setupLED() {
   pinMode(LED_RED_PIN, OUTPUT);
   pinMode(LED_GREEN_PIN, OUTPUT);
   pinMode(LED_BLUE_PIN, OUTPUT);
@@ -285,12 +287,11 @@ void displayArray(int size, int *array, int x, int y) {
 
 void displayStandardScreen() {
    
-  // Convert Variable1 into a string, so we can change the text alignment to the right:
-  // It can be also used to add or remove decimal numbers.
   char string[10];
 
   // convert float to a string
-  dtostrf(temperature, 4, 2, string); // (<variable>,<amount of digits we are going to use>,<amount of decimal digits>,<string name>)
+  // (<variable>,<amount of digits we are going to use>,<amount of decimal digits>,<string name>)
+  dtostrf(temperature, 4, 2, string);
   display.clearDisplay();
 
   display.setCursor(0, 8);
@@ -434,7 +435,7 @@ void humidityWatering() {
     return;
   }
 
-  if (millis() - lastHumidityWatering >= 120000) {
+  if (millis() - lastHumidityWatering >= humidityCooldownTime) {
     humidityCooldown = false;
   }
 
@@ -464,7 +465,11 @@ void humidityWatering() {
 }
 
 void manualWatering() {
-
+  if (digitalRead(CHANGE_VALS_PIN) == LOW) {
+    digitalWrite(RELAY_PIN, LOW);
+  } else {
+    digitalWrite(RELAY_PIN, HIGH);
+  }
 }
 
 void timedWatering() {
@@ -490,7 +495,6 @@ void handleMode() {
 void loop() {
   
   //waterLevel = analogRead(WATER_LEVEL_PIN);
-
   //Serial.println(waterLevel);  
 
   readHumidity();
@@ -503,9 +507,7 @@ void loop() {
 
   if (!standby && (millis() - lastActivityTime >= standbyTime)) {
     standby = true;
-    //if (screen == MENU) {
-      updateEEPROM();
-    //}
+    updateEEPROM();
     // power management settings maybe
   }
 
