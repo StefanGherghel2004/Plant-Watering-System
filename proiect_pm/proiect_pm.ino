@@ -62,6 +62,8 @@ const unsigned long standbyTime = 60000; // 1 minute
 volatile bool standby = false;
 volatile bool wakeFlag = false;
 
+unsigned long lastRelayCommand = 0;
+
 int waterLevel = 0;
 
 unsigned long lastLedUpdate = 0;
@@ -98,6 +100,11 @@ ISR(INT0_vect) {
 
     // debounce
     if (millis() - lastActivityTime < 200) {
+      return;
+    }
+
+    // stop noise from the relay
+    if (millis() - lastRelayCommand < 200) {
       return;
     }
 
@@ -429,6 +436,25 @@ void readHumidity() {
   }
 }
 
+bool checkVoltage() {
+  if (voltage < 3) {
+    LEDMode = RED_FADE; // battery low error
+    //Serial.println("SI AICI");
+    return false;
+  }
+  return true;
+}
+
+bool checkWaterLevel() {
+
+  if (analogRead(WATER_LEVEL_PIN) < 400) {
+    LEDMode = BLUE_FADE; // water level low error
+    //Serial.println("AICI");
+    return false;
+  }
+  return true;
+}
+
 void humidityWatering() {
 
   if (millis() < 500) {
@@ -465,18 +491,53 @@ void humidityWatering() {
 }
 
 void manualWatering() {
-  if (digitalRead(CHANGE_VALS_PIN) == LOW) {
-    digitalWrite(RELAY_PIN, LOW);
-  } else {
+  bool buttonPressed = (digitalRead(CHANGE_VALS_PIN) == LOW);
+
+  if (buttonPressed && digitalRead(RELAY_PIN) == HIGH) {
+
+    if (checkWaterLevel() && checkVoltage()) {
+      digitalWrite(RELAY_PIN, LOW);
+      watering = true;
+      lastRelayCommand = millis();
+    }
+  } 
+  else if (!buttonPressed && digitalRead(RELAY_PIN) == LOW) {
     digitalWrite(RELAY_PIN, HIGH);
+    watering = false;
+    lastRelayCommand = millis();
   }
+
 }
 
 void timedWatering() {
   
 }
 
+
+// this checks every time is called i need to make it more power efficient
+void checkReturnFromError() {
+  if (LEDMode == BLUE_FADE) {
+    if (analogRead(WATER_LEVEL_PIN) > 400) {
+      LEDMode = OFF;
+    }
+  }
+
+  if (LEDMode == RED_FADE) {
+    if (voltage > 3) {
+      LEDMode = OFF;
+    }
+  }
+
+}
+
 void handleMode() {
+
+  // battery or water error
+  if (LEDMode != OFF) {
+    checkReturnFromError();
+    return;
+  }
+
    switch(mode) {
     case HUMIDITY:
       humidityWatering();
@@ -493,9 +554,6 @@ void handleMode() {
 // TO DO un fel de reset pentru ecran ca isi mai ia freeze de la releu
 
 void loop() {
-  
-  //waterLevel = analogRead(WATER_LEVEL_PIN);
-  //Serial.println(waterLevel);  
 
   readHumidity();
 
