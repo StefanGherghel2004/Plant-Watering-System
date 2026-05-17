@@ -244,8 +244,11 @@ ISR(INT1_vect) {
     return;
   }
 
-  changeSelectedValue = true;
-  lastActivityTime = ms;
+
+  if (digitalRead(CHANGE_VALS_PIN) == LOW) {
+    changeSelectedValue = true;
+    lastActivityTime = ms;
+  }
 }
 
 void updateEEPROM() {
