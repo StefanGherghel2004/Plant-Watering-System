@@ -13,7 +13,7 @@ Adafruit_SSD1306 display(128, 64); // create display
 #define LED_BLUE_PIN         9   // PB1
 
 #define RELAY_PIN            8   // PB0
-#define MANUAL_MODE_PIN      7  
+#define MANUAL_MODE_PIN      7   // PD7
 
 #define CHANGE_MODE_PIN      2   // PD2 / INT0
 #define CHANGE_VALS_PIN      3   // PD3 / INT1
@@ -24,7 +24,11 @@ Adafruit_SSD1306 display(128, 64); // create display
 #define HUMIDITY_PIN         A2  // PC2
 #define BATTERY_PIN          A3  // PC3
 
-#define MS_PER_DAY           10000UL
+#define MS_PER_DAY           86400000UL
+#define WATERING_DURATION    2000UL
+
+#define MIN_BATTERY_VOLTAGE   3.0 // dummy value
+#define MIN_WATER_LEVEL       400 // can change in final version
 
 #define DRY_VOLTAGE          3.0
 #define WET_VOLTAGE          1.4
@@ -66,6 +70,9 @@ unsigned long lastActivityTime = 0;
 const unsigned long standbyTime = 60000; // 1 minute
 volatile bool standby = false;
 volatile bool wakeFlag = false;
+volatile bool changeSelectedValuesList = false;
+volatile bool changeSelectedValue      = false;
+volatile bool changeScreen             = false;
 
 unsigned long lastRelayCommand = 0;
 
@@ -169,33 +176,53 @@ enum ScreenMode {
 ScreenMode screen = STANDARD;
 ScreenMode lastScreen = STANDARD;
 
+unsigned long currentMillis;
+
+
+int myAnalogRead(uint8_t pin) {
+
+  if (pin >= 14) {
+    pin = pin - 14;
+  }
+
+  pin &= 0x07;
+
+  // reference and channel
+  ADMUX = (1 << REFS0) | pin;
+
+  // ADC start conversion
+  ADCSRA |= (1 << ADSC);
+
+  // wait for conversion to finish
+  while (ADCSRA & (1 << ADSC));
+
+  return ADC;
+}
+
 // ISR for changing mode of operation in STANDARD screen
 // and changing parameter to modify in MENU screen
 ISR(INT0_vect) {
   if (!standby && !watering) {
 
+    unsigned long ms = currentMillis;
+
     // debounce
-    if (millis() - lastActivityTime < 200) {
+    if (ms - lastActivityTime < 200) {
       return;
     }
 
     // stop noise from the relay
-    if (millis() - lastRelayCommand < 200) {
-      return;
-    }
-
-    lastActivityTime = millis();
-
-    // temporary solution for weird bug that increments saved mode on reset
-    if (lastActivityTime < 500 || lastActivityTime - lastHumidityWatering < 500) {
+    if (ms- lastRelayCommand < 200) {
       return;
     }
 
     if (screen == STANDARD) {
       changeMode = true;
     } else if (screen == MENU) {
-      selectedValuesList = (selectedValuesList + 1) % 2;
+      changeSelectedValuesList = true;
     }
+
+    lastActivityTime = ms;
 
   }
 }
@@ -206,22 +233,19 @@ ISR(INT1_vect) {
     return;
   }
 
+  unsigned long ms = currentMillis;
+
   // debounce
-  if (millis() - lastActivityTime < 200) {
+  if (ms - lastActivityTime < 200) {
     return;
   }
 
-  if (millis() - lastRelayCommand < 200) {
+  if (ms - lastRelayCommand < 200) {
     return;
   }
 
-  if (selectedValuesList == 0) {
-    humidityIndex = (humidityIndex + 1) % NUM_LEVELS;
-  } else {
-    timedIndex = (timedIndex + 1) % NUM_LEVELS;
-  }
-
-  lastActivityTime = millis();
+  changeSelectedValue = true;
+  lastActivityTime = ms;
 }
 
 void updateEEPROM() {
@@ -234,12 +258,18 @@ void updateEEPROM() {
 // ISR for exiting standby mode and for changing screens
 ISR(PCINT2_vect) {
 
-  // debounce
-  if (millis() - lastActivityTime < 200) {
+  unsigned long ms = currentMillis;
+
+  if (watering) {
     return;
   }
 
-  if (millis() - lastRelayCommand < 1000) {
+  // debounce
+  if (ms - lastActivityTime < 200) {
+    return;
+  }
+
+  if (ms - lastRelayCommand < 200) {
     return;
   }
 
@@ -247,23 +277,10 @@ ISR(PCINT2_vect) {
     wakeFlag = true;
   } else {
 
-    if (screen == WATERING) {
-      return;
-    }
-
     if (digitalRead(WAKE_PIN) == LOW) {
       
-      if (screen == MENU) {
-        updateEEPROM();
-      }
-
-      if (screen == MENU) {
-        screen = STANDARD;
-      } else if (screen == STANDARD) {
-        screen = MENU;
-      }
-
-      lastActivityTime = millis();
+      changeScreen = true;
+      lastActivityTime = ms;
 
     }
   }
@@ -279,7 +296,7 @@ void setupWakePin() {
 }
 
 void setupChangeModePin() {
-  // PD2 intrare
+  // PD2 input
   DDRD &= ~(1 << DDD2);
 
   // pull-up
@@ -289,7 +306,7 @@ void setupChangeModePin() {
   EICRA |= (1 << ISC01);
   EICRA &= ~(1 << ISC00);
 
-  // activam INT0
+  // INT0 enable
   EIMSK |= (1 << INT0);
 }
 
@@ -305,7 +322,7 @@ void setupChangeValsPin() {
   EICRA |= (1 << ISC11);
   EICRA &= ~(1 << ISC10);
 
-  // activam INT1
+  // INT1 enable
   EIMSK |= (1 << INT1);
 }
 
@@ -362,6 +379,8 @@ void setup() {
   Serial.begin(9600);
   sei();
 
+  // ENABLE ADC and prescaler 128
+  ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
   setupDisplay();
   
   setupChangeModePin();
@@ -411,18 +430,23 @@ void displayStandardScreen() {
 
   display.setCursor(0, 50);
   display.print("Temp: ");
-  display.print(string);
-
-  dtostrf(voltage, 3, 2, string);
-  display.setCursor(75, 50);
-  display.print("V: ");
-  display.print(string);
+  if (temperature == 0.0) {
+    display.print("NaN");
+  } else {
+    display.print(string);
+    display.write(247); // ASCII for °
+    display.print("C");
+  }
 
   dtostrf(humidity, 3, 2, string);
   display.setCursor(0, 30);
   display.print("Hum: ");
-  display.print(string);
-  display.print("%");
+  if (humidity == 0.0) {
+    display.print("NaN");
+  } else {
+    display.print(string);
+    display.print("%");
+  }
 
   display.display(); // print everything set
 }
@@ -453,13 +477,36 @@ void displayMenuScreen() {
 void displayWateringImage() {
   display.clearDisplay();
 
-  display.drawBitmap(0, 0, epd_bitmap_water_drop, 128, 64, 0, 1);
+
+  if (mode == MANUAL) {
+    display.drawBitmap(0, 0, epd_bitmap_water_drop, 128, 64, 0, 1);
+  } else {
+    display.drawBitmap(0, -5, epd_bitmap_water_drop, 128, 64, 0, 1);
+
+    unsigned long time = currentMillis - wateringStart;
+
+    if (time > WATERING_DURATION) {
+      time = WATERING_DURATION;
+    }
+
+    int percent = (time * 100UL) / WATERING_DURATION;
+
+    display.drawRect(10, 58, 108, 6, SSD1306_WHITE);
+
+    int length = (percent * 104) / 100;
+
+    display.fillRect(12, 60, length, 2, SSD1306_WHITE);
+  }
 
   display.display();
 }
 
 
 void displayHandler() {
+
+  if (standby) {
+    return;
+  }
 
   switch(screen) {
     case STANDARD:
@@ -481,8 +528,8 @@ void handleLEDSignal() {
     checkReturnFromError();
   }
 
-  if (millis() - lastLedUpdate >= 20) {
-    lastLedUpdate = millis();
+  if (currentMillis - lastLedUpdate >= 20) {
+    lastLedUpdate = currentMillis;
 
     brightness += fadeAmount;
 
@@ -507,28 +554,65 @@ void handleLEDSignal() {
   }
 }
 
+int getFilteredADC(uint8_t pin, uint8_t totalReadings, uint8_t trimAmount) {
+  int readings[10]; 
+  if (totalReadings > 10) totalReadings = 10;
+  
+  for (uint8_t i = 0; i < totalReadings; i++) {
+    readings[i] = myAnalogRead(pin);
+    delayMicroseconds(50);
+  }
+
+  for (uint8_t i = 0; i < totalReadings - 1; i++) {
+    for (uint8_t j = 0; j < totalReadings - i - 1; j++) {
+      if (readings[j] > readings[j + 1]) {
+        int temp = readings[j];
+        readings[j] = readings[j + 1];
+        readings[j + 1] = temp;
+      }
+    }
+  }
+
+  long sum = 0;
+  uint8_t validCount = 0;
+
+  for (uint8_t i = trimAmount; i < (totalReadings - trimAmount); i++) {
+    sum += readings[i];
+    validCount++;
+  }
+
+  if (validCount == 0) {
+    return readings[totalReadings / 2];
+  }
+
+  return sum / validCount;
+}
+
 void readTemperature() {
   if (watering) {
     return;
   }
-  if (millis() - lastReadTimeTemp >= intervalTemp) {
-    lastReadTimeTemp = millis();
-    temperature = analogRead(TEMP_PIN) * 0.488;
+  if (currentMillis - lastReadTimeTemp >= intervalTemp) {
+    lastReadTimeTemp = currentMillis;
+    int cleanADC = getFilteredADC(TEMP_PIN, 5, 1);
+    temperature = cleanADC * 0.488;
   }
 }
 
 void readBatteryVoltage(bool forced = false) {
-  if (forced || (millis() - lastReadTimeBattery >= intervalBattery)) {
-    lastReadTimeBattery = millis();
-    voltage = analogRead(BATTERY_PIN) * (5.0 / 1023.0) * 2;
+  if (forced || (currentMillis - lastReadTimeBattery >= intervalBattery)) {
+    lastReadTimeBattery = currentMillis;
+    int cleanADC = getFilteredADC(BATTERY_PIN, 3, 0);
+    voltage = cleanADC * (5.0 / 1023.0) * 2;
   }
 }
 
 void readHumidity() {
-  if (millis() - lastReadTimeHumidity >= intervalHumidity) {
-    lastReadTimeHumidity = millis();
+  if (currentMillis - lastReadTimeHumidity >= intervalHumidity) {
+    lastReadTimeHumidity = currentMillis;
 
-    float sensorVoltage = analogRead(HUMIDITY_PIN) * (5.0 / 1023.0);
+    int cleanADC = getFilteredADC(HUMIDITY_PIN, 5, 1);
+    float sensorVoltage = cleanADC * (5.0 / 1023.0);
     humidity = (DRY_VOLTAGE - sensorVoltage) * 100.0 / (DRY_VOLTAGE - WET_VOLTAGE);
 
     if (humidity > 100) {
@@ -541,10 +625,10 @@ void readHumidity() {
 }
 
 void readWaterLevel(bool forced = false) {
-  if (forced || (millis() - lastReadTimeWaterLevel >= intervalWaterLevel)) {
-    lastReadTimeWaterLevel = millis();
+  if (forced || (currentMillis - lastReadTimeWaterLevel >= intervalWaterLevel)) {
+    lastReadTimeWaterLevel = currentMillis;
 
-    waterLevel = analogRead(WATER_LEVEL_PIN);
+    waterLevel = getFilteredADC(WATER_LEVEL_PIN, 3, 0);
     Serial.println(waterLevel);
   }
 }
@@ -552,9 +636,8 @@ void readWaterLevel(bool forced = false) {
 bool checkVoltage() {
   readBatteryVoltage(true);
   Serial.println("V CHECK");
-  if (voltage < 3) {
+  if (voltage < MIN_BATTERY_VOLTAGE) {
     LEDMode = RED_FADE; // battery low error
-    //Serial.println("SI AICI");
     return false;
   }
   return true;
@@ -562,9 +645,8 @@ bool checkVoltage() {
 
 bool checkWaterLevel() {
   readWaterLevel(true);
-  if (waterLevel < 400) {
+  if (waterLevel < MIN_WATER_LEVEL) {
     LEDMode = BLUE_FADE; // water level low error
-    //Serial.println("AICI");
     return false;
   }
   return true;
@@ -572,11 +654,11 @@ bool checkWaterLevel() {
 
 void humidityWatering() {
 
-  if (millis() < 500) {
+  if (currentMillis < 500) {
     return;
   }
 
-  if (millis() - lastHumidityWatering >= humidityCooldownTime) {
+  if (currentMillis - lastHumidityWatering >= humidityCooldownTime) {
     humidityCooldown = false;
   }
 
@@ -584,27 +666,31 @@ void humidityWatering() {
     return;
   }
 
-  if (!watering && humidity < humidityThresholds[humidityIndex]) {
+  if (!watering && humidity < humidityThresholds[humidityIndex] && humidity != 0.0) {
 
     if (checkWaterLevel() && checkVoltage()) {
-      Serial.println("Start udat umiditate");
-      Serial.println(millis());
+
       digitalWrite(RELAY_PIN, LOW);
+      lastRelayCommand = currentMillis;
 
       watering = true;
-      wateringStart = millis();
+      wateringStart = currentMillis;
+      lastScreen = screen;
+      screen = WATERING;
     }
   }
 
-  // 1 second for testing
-  if (watering && millis() - wateringStart >= 1000) {
+  if (watering && currentMillis - wateringStart >= WATERING_DURATION) {
     Serial.println("Sfarsit udat umiditate");
+    Serial.println(currentMillis);
     Serial.println(millis());
     digitalWrite(RELAY_PIN, HIGH);
     
-    lastHumidityWatering = millis();
+    lastHumidityWatering = currentMillis;
     watering = false;
     humidityCooldown = true;
+    lastRelayCommand = currentMillis;
+    screen   = lastScreen;
   }
 }
 
@@ -618,14 +704,14 @@ void manualWatering() {
       watering = true;
       lastScreen = screen;
       screen = WATERING;
-      lastRelayCommand = millis();
+      lastRelayCommand = currentMillis;
     }
   } 
   else if (!buttonPressed && digitalRead(RELAY_PIN) == LOW) {
     digitalWrite(RELAY_PIN, HIGH);
     watering = false;
     screen   = lastScreen;
-    lastRelayCommand = millis();
+    lastRelayCommand = currentMillis;
   }
 
 }
@@ -633,25 +719,26 @@ void manualWatering() {
 void timedWatering() {
   unsigned long currentInterval = (unsigned long)wateringIntervals[timedIndex] * MS_PER_DAY;
 
-  if (!watering && (millis() - lastTimedWateringTime >= currentInterval)) {
+  if (!watering && (currentMillis - lastTimedWateringTime >= currentInterval)) {
     
     if (checkWaterLevel() && checkVoltage()) {
-      Serial.println("Starting Timed Watering");
       digitalWrite(RELAY_PIN, LOW);
 
+      lastScreen = screen;
+      screen = WATERING;
       watering = true;
-      wateringStart = millis();
-      lastRelayCommand = millis();
+      wateringStart = currentMillis;
+      lastRelayCommand = currentMillis;
     }
   }
 
-  if (watering && (millis() - wateringStart >= 1000)) {
-    Serial.println("Finished Timed Watering");
+  if (watering && (currentMillis - wateringStart >= WATERING_DURATION)) {
     digitalWrite(RELAY_PIN, HIGH);
     
-    lastTimedWateringTime = millis();
+    lastTimedWateringTime = currentMillis;
     watering = false;
-    lastRelayCommand = millis();
+    screen   = lastScreen;
+    lastRelayCommand = currentMillis;
   }
 }
 
@@ -661,14 +748,14 @@ void timedWatering() {
 void checkReturnFromError() {
   if (LEDMode == BLUE_FADE) {
     readWaterLevel();
-    if (waterLevel > 400) {
+    if (waterLevel > MIN_WATER_LEVEL) {
       LEDMode = OFF;
     }
   }
 
   if (LEDMode == RED_FADE) {
     readBatteryVoltage();
-    if (voltage > 3) {
+    if (voltage > MIN_BATTERY_VOLTAGE) {
       LEDMode = OFF;
     }
   }
@@ -690,10 +777,11 @@ void handleMode() {
   }
 }
 
-// TO DO un fel de reset pentru ecran ca isi mai ia freeze de la releu
-
 void loop() {
-  //Serial.println("VIU");
+
+  currentMillis = millis();
+  
+  displayHandler();
 
   readHumidity();
 
@@ -701,7 +789,7 @@ void loop() {
 
   handleLEDSignal();
 
-  if (!standby && (millis() - lastActivityTime >= standbyTime)) {
+  if (!standby && (currentMillis - lastActivityTime >= standbyTime)) {
     standby = true;
     updateEEPROM();
     // power management settings maybe
@@ -713,7 +801,7 @@ void loop() {
     standby = false;
     // back to main menu after standby
     screen = STANDARD;
-    lastActivityTime = millis();
+    lastActivityTime = currentMillis;
   }
 
   if (standby) {
@@ -729,8 +817,33 @@ void loop() {
     mode = (FunctionMode)((mode + 1) % 3);
   }
 
+  if (changeSelectedValuesList) {
+    changeSelectedValuesList = false;
+    selectedValuesList = (selectedValuesList + 1) % 2;
+  }
+
+  if (changeSelectedValue) {
+    changeSelectedValue = false;
+    if (selectedValuesList == 0) {
+      humidityIndex = (humidityIndex + 1) % NUM_LEVELS;
+    } else {
+      timedIndex = (timedIndex + 1) % NUM_LEVELS;
+    }
+  }
+
+  if (changeScreen) {
+    changeScreen = false;
+    if (screen == MENU) {
+        updateEEPROM();
+      }
+
+    if (screen == MENU) {
+      screen = STANDARD;
+    } else if (screen == STANDARD) {
+      screen = MENU;
+    }
+  }
+
   // temperature not read when in standby
   readTemperature();
-
-  displayHandler();
 }
